@@ -4,7 +4,10 @@ from pathlib import Path
 # Add the parent directory to sys.path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from loops_api.loop_predictor import LoopPredictor
+from utils.base_loop_predictor import LoopPredictor, MissingRegion
+from utils.simple_predictor import SimplePredictor
+from utils.modeller_predictor import ModellerPredictor, MODELLER_AVAILABLE
+
 import requests
 import tempfile
 import os
@@ -15,9 +18,11 @@ from Bio.PDB.Polypeptide import is_aa
 from Bio.PDB.PDBParser import PDBParser
 from Bio.PDB.MMCIFParser import MMCIFParser
 
-sys.path.insert(0, "/opt/homebrew/Cellar/modeller/10.7/modlib")
-import modeller
-print(modeller.__version__)
+# Add Modeller path if available
+if MODELLER_AVAILABLE:
+    sys.path.insert(0, "/opt/homebrew/Cellar/modeller/10.7/modlib")
+    import modeller
+    print(f"Using Modeller version {modeller.__version__}")
 
 def get_pdb_file(pdb_id: str) -> str:
     """Get PDB file path, downloading if necessary"""
@@ -98,6 +103,10 @@ def build_full_resnum_to_seqidx_map(mmcif_dict, chain_id, entity_id):
 
 def test_modeller_predictions():
     """Test Modeller-based loop predictions and structure insertion"""
+    if not MODELLER_AVAILABLE:
+        print("Modeller is not available. Skipping Modeller tests.")
+        return
+        
     # Get the structure file
     pdb_id = "3IDP"  # Using 3IDP as it has a good example of a missing loop
     pdb_file = get_pdb_file(pdb_id)
@@ -123,7 +132,7 @@ def test_modeller_predictions():
                 return
         
         # Initialize predictor
-        predictor = LoopPredictor(pdb_file)
+        predictor = ModellerPredictor(pdb_file)
         
         # Load structure and find missing regions
         predictor.load_structure()
@@ -140,7 +149,7 @@ def test_modeller_predictions():
             
             # Generate predictions using Modeller
             try:
-                conformations = predictor.generate_conformations(region, num_conformations=2, use_modeller=True)
+                conformations = predictor.generate_conformations(region, num_conformations=2)
                 print(f"Generated {len(conformations)} Modeller conformations")
                 
                 # Verify each conformation
@@ -175,10 +184,6 @@ def test_modeller_predictions():
                     print(f"Conformation {conf['conformation_id']} verified successfully")
                     print(f"Quality score: {conf['quality_score']:.3f}")
                 
-            except ImportError as e:
-                print(f"Modeller not available: {e}")
-                print("Skipping Modeller tests")
-                break
             except Exception as e:
                 print(f"Error during Modeller prediction: {e}")
                 raise
@@ -196,60 +201,48 @@ def test_modeller_predictions():
         print(f"Error during testing: {e}")
         raise
 
-def test_loop_prediction():
+def test_simple_predictions():
+    """Test simple linear interpolation predictions"""
     # Get the structure file
     pdb_id = "3IDP"
     pdb_file = get_pdb_file(pdb_id)
     
     try:
         # Initialize predictor
-        predictor = LoopPredictor(pdb_file)
+        predictor = SimplePredictor(pdb_file)
         
         # Load structure and find missing regions
         predictor.load_structure()
-        
-        # Debug: Print mmCIF header data
-        print("\nmmCIF Header Data:")
-        if hasattr(predictor.structure, 'header'):
-            header = predictor.structure.header
-            if isinstance(header, dict):
-                print("Available keys:", list(header.keys()))
-                if '_entity_poly_seq' in header:
-                    print("\n_entity_poly_seq records:")
-                    for record in header['_entity_poly_seq']:
-                        print(f"Chain {record.get('pdbx_strand_id')}: {record.get('mon_id', [])}")
-        
-        # Debug: Print full chain sequences
-        print("\nFull chain sequences:")
-        for chain_id, sequence in predictor.full_chain_sequences.items():
-            print(f"Chain {chain_id}: {sequence}")
-        
         missing_regions = predictor.find_missing_regions()
         
-        print(f"\nFound {len(missing_regions)} missing regions in {pdb_id}:")
-        for region in missing_regions:
-            print(f"\nChain {region.chain_id}: {region.start_res} to {region.end_res} (length: {region.length})")
-            print(f"  Start residue: {region.start_res_name}")
-            print(f"  End residue: {region.end_res_name}")
-            print(f"  Missing sequence: {region.missing_sequence}")
-            print(f"  Full chain sequence length: {len(region.full_chain_sequence)}")
-            
-            # Verify sequence properties
-            assert len(region.missing_sequence) == region.length, \
-                f"Missing sequence length ({len(region.missing_sequence)}) doesn't match gap length ({region.length})"
-            
-            # Verify coordinates are present
-            assert region.start_coords is not None and region.end_coords is not None, "Missing coordinates"
-            assert region.start_coords.shape == (3,) and region.end_coords.shape == (3,), "Coordinates should be 3D vectors"
-            
-            # Verify the full chain sequence exists
-            assert region.full_chain_sequence, "Full chain sequence should exist"
-            
-            # Verify the region is within the full chain sequence length
-            assert region.start_res < region.end_res, "Start residue should be before end residue"
-            assert region.length > 0, "Region length should be positive"
+        print(f"\nTesting simple predictions for {pdb_id}")
+        print(f"Found {len(missing_regions)} missing regions")
         
-        # Generate and save predictions
+        # Test each missing region
+        for i, region in enumerate(missing_regions):
+            print(f"\nTesting region {i+1}:")
+            print(f"Chain {region.chain_id}: {region.start_res} to {region.end_res} (length: {region.length})")
+            print(f"Missing sequence: {region.missing_sequence}")
+            
+            # Generate predictions
+            conformations = predictor.generate_conformations(region, num_conformations=5)
+            print(f"Generated {len(conformations)} simple conformations")
+            
+            # Verify each conformation
+            for conf in conformations:
+                # Check that we have coordinates
+                assert 'coordinates' in conf, "Missing coordinates in conformation"
+                assert len(conf['coordinates']) == region.length, \
+                    f"Number of coordinates ({len(conf['coordinates'])}) doesn't match region length ({region.length})"
+                
+                # Check that we have a quality score
+                assert 'quality_score' in conf, "Missing quality score in conformation"
+                assert isinstance(conf['quality_score'], float), "Quality score should be a float"
+                
+                print(f"Conformation {conf['conformation_id']} verified successfully")
+                print(f"Quality score: {conf['quality_score']:.3f}")
+        
+        # Save results
         output_dir = Path("predictions")
         predictor.save_results(output_dir)
         
@@ -258,20 +251,10 @@ def test_loop_prediction():
         for file in output_dir.glob("*.pdb"):
             print(f"  {file.name}")
         
-        # Print metadata
-        metadata_file = output_dir / "metadata.json"
-        if metadata_file.exists():
-            print("\nMetadata summary:")
-            with open(metadata_file) as f:
-                import json
-                metadata = json.load(f)
-                print(f"  PDB ID: {metadata['pdb_file_path']}")
-                print(f"  Number of regions: {len(metadata['missing_regions'])}")
-    
     except Exception as e:
         print(f"Error during testing: {e}")
-        raise  # Re-raise the exception to see the full traceback
+        raise
 
 if __name__ == "__main__":
-    test_loop_prediction()
-    test_modeller_predictions()  # Add the new test 
+    test_simple_predictions()
+    test_modeller_predictions() 

@@ -1,41 +1,13 @@
-import json
-import logging
-import sys
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
-from dataclasses import dataclass
-from Bio.PDB.PDBIO import PDBIO
-from Bio.PDB.PDBParser import PDBParser
-from Bio.PDB.MMCIFParser import MMCIFParser
+import json
+from Bio.PDB import PDBParser, MMCIFParser, Structure, Model, Chain, Residue, Atom, PDBIO
+from Bio.PDB.Polypeptide import is_aa
 from Bio.SeqUtils import seq1
 from Bio.PDB.MMCIF2Dict import MMCIF2Dict
-from Bio.PDB.Polypeptide import is_aa
-
-# Add the parent directory to sys.path if running directly
-if __name__ == "__main__":
-    sys.path.append(str(Path(__file__).parent.parent))
-
-# Try to import ModellerLoopPredictor, but don't fail if it's not available
-MODELLER_AVAILABLE = False
-try:
-    from loops_api.utils.modeller_predictor import ModellerLoopPredictor, MODELLER_AVAILABLE
-    if MODELLER_AVAILABLE:
-        logging.info("ModellerLoopPredictor successfully imported")
-    else:
-        logging.warning("ModellerLoopPredictor imported but Modeller is not available")
-except ImportError as e:
-    try:
-        from utils.modeller_predictor import ModellerLoopPredictor, MODELLER_AVAILABLE
-        if MODELLER_AVAILABLE:
-            logging.info("ModellerLoopPredictor successfully imported")
-        else:
-            logging.warning("ModellerLoopPredictor imported but Modeller is not available")
-    except ImportError as e:
-        logging.warning(f"Failed to import ModellerLoopPredictor: {e}")
-        logging.warning("Modeller-based predictions will not work.")
-
-logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] %(message)s')
+import logging
+from dataclasses import dataclass
 
 @dataclass
 class MissingRegion:
@@ -53,16 +25,17 @@ class MissingRegion:
     end_icode: str
 
 class LoopPredictor:
+    """Base class for loop prediction methods"""
+    
     def __init__(self, pdb_file_path: str):
         self.pdb_file_path = pdb_file_path
         self.structure = None
         self.cif_dict = {}
         self.full_chain_sequences: Dict[str, str] = {}
-        self.observed_residues_by_label_seq_id: Dict[Tuple[str, int], Tuple[int, str, PDB.Residue.Residue]] = {}
+        self.observed_residues_by_label_seq_id: Dict[Tuple[str, int], Tuple[int, str, Residue.Residue]] = {}
         self.label_seq_id_to_full_seq_idx: Dict[Tuple[str, int], int] = {}
-        self.original_flanking_residues: Dict[Tuple[str, int, str], PDB.Residue.Residue] = {}
+        self.original_flanking_residues: Dict[Tuple[str, int, str], Residue.Residue] = {}
         self.auth_id_to_label_seq_id: Dict[Tuple[str, int], int] = {}
-        self.modeller_predictor = None  # Initialize to None first
 
     def _get_chain_sequence_from_mmcif(self, chain_id: str) -> Optional[str]:
         """Get the sequence from mmCIF _entity_poly_seq or _struct_ref_seq records"""
@@ -88,7 +61,7 @@ class LoopPredictor:
                         continue
         
         return None
-    
+
     def _create_residue_mapping(self, chain) -> Dict[int, int]:
         """Create a mapping between PDB residue numbers and sequence indices"""
         mapping = {}
@@ -106,7 +79,7 @@ class LoopPredictor:
                 seq_idx += 1
                 
         return mapping
-    
+
     def _extract_chain_sequences_from_mmcif(self):
         """Extract full chain sequences for each chain from mmCIF _entity_poly and _entity_poly_seq"""
         if not hasattr(self.structure, 'header') or not isinstance(self.structure.header, dict):
@@ -160,7 +133,7 @@ class LoopPredictor:
         sequence = ''.join(sequence)
         self.full_chain_sequences[chain_id] = sequence
         return sequence
-    
+
     def _get_missing_sequence(self, chain_id: str, start_res: int, end_res: int) -> str:
         """Get the sequence of missing residues using residue mapping"""
         if chain_id not in self.full_chain_sequences:
@@ -211,6 +184,7 @@ class LoopPredictor:
         return 'X' * (end_res - start_res - 1)
 
     def load_structure(self) -> None:
+        """Load and parse the structure file"""
         if self.pdb_file_path.endswith('.cif'):
             parser = MMCIFParser()
             self.cif_dict = MMCIF2Dict(self.pdb_file_path)
@@ -236,15 +210,6 @@ class LoopPredictor:
                             self.original_flanking_residues[(chain.id, res.id[1], res.id[2])] = res
                             idx_counter += 1
                     self.full_chain_sequences[chain.id] = seq_from_atom
-        
-        # Initialize ModellerLoopPredictor after loading structure and creating mappings
-        if MODELLER_AVAILABLE:
-            self.modeller_predictor = ModellerLoopPredictor(
-                self.pdb_file_path, 
-                auth_id_to_label_seq_id=self.auth_id_to_label_seq_id,
-                label_seq_id_to_full_seq_idx=self.label_seq_id_to_full_seq_idx,
-                original_structure=self.structure  # Pass the Biopython structure
-            )
 
     def _parse_mmcif_sequences_and_mappings(self):
         """
@@ -360,6 +325,7 @@ class LoopPredictor:
                 logging.debug("No indices mapped for this chain")
 
     def find_missing_regions(self) -> List[MissingRegion]:
+        """Find all missing regions in the structure"""
         if not self.structure:
             raise ValueError("Structure not loaded. Call load_structure() first.")
         missing_regions = []
@@ -426,31 +392,7 @@ class LoopPredictor:
         
         self.missing_regions = missing_regions
         return missing_regions
-    
-    def generate_conformations(self, region: MissingRegion, num_conformations: int = 5, use_modeller: bool = False) -> List[Dict]:
-        """Generate multiple conformations for a missing region"""
-        if use_modeller:
-            if not MODELLER_AVAILABLE:
-                raise ImportError("Modeller is not available. Please install it from https://salilab.org/modeller/")
-            return self.modeller_predictor.predict_loop(region, num_conformations)
-        else:
-            # Original simple prediction method
-            conformations = []
-            for i in range(num_conformations):
-                variation = np.random.normal(0, 0.5, (region.length, 3))
-                coords = []
-                for j in range(region.length):
-                    t = (j + 1) / (region.length + 1)
-                    coord = (1 - t) * region.start_coords + t * region.end_coords + variation[j]
-                    coords.append(coord)
-                quality_score = self._calculate_quality_score(coords, region)
-                conformations.append({
-                    'coordinates': coords,
-                    'quality_score': quality_score,
-                    'conformation_id': i
-                })
-            return conformations
-    
+
     def _calculate_quality_score(self, coords: List[np.ndarray], region: MissingRegion) -> float:
         """Calculate a quality score for a conformation"""
         # Check distance from start/end points
@@ -475,7 +417,11 @@ class LoopPredictor:
         score *= np.exp(-np.std(bond_lengths))  # Penalize irregular bond lengths
         
         return float(score)
-    
+
+    def generate_conformations(self, region: MissingRegion, num_conformations: int = 5) -> List[Dict]:
+        """Generate multiple conformations for a missing region - to be implemented by subclasses"""
+        raise NotImplementedError("Subclasses must implement generate_conformations")
+
     def save_results(self, output_dir: str) -> None:
         """Save predicted structures and metadata"""
         output_dir = Path(output_dir)
@@ -516,11 +462,11 @@ class LoopPredictor:
                     io = PDBIO()
                     io.set_structure(conf['complete_structure'])
                     io.save(str(complete_file))
-    
+
     def _write_conformation(self, output_file: Path, region: MissingRegion, conf: Dict) -> None:
         """Write a conformation to a PDB file"""
         with open(output_file, 'w') as f:
             f.write(f"REMARK  Quality score: {conf['quality_score']:.3f}\n")
             for i, coord in enumerate(conf['coordinates']):
                 res_num = region.start_res + i + 1
-                f.write(f"ATOM  {i+1:5d}  CA  ALA {region.chain_id}{res_num:4d}    {coord[0]:8.3f}{coord[1]:8.3f}{coord[2]:8.3f}\n")
+                f.write(f"ATOM  {i+1:5d}  CA  ALA {region.chain_id}{res_num:4d}    {coord[0]:8.3f}{coord[1]:8.3f}{coord[2]:8.3f}\n") 

@@ -20,10 +20,7 @@ import json
 # Add the parent directory to sys.path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-try:
-    from loops_api.loop_predictor import MissingRegion
-except ImportError:
-    from loop_predictor import MissingRegion
+from .base_loop_predictor import LoopPredictor, MissingRegion
 
 # Try to import Modeller, but don't fail if it's not available
 MODELLER_AVAILABLE = False
@@ -54,42 +51,27 @@ except ImportError as e:
     logging.warning(f"Modeller import failed: {e}")
     logging.warning("Modeller-based predictions will not work.")
 
-class ModellerLoopPredictor:
-    def __init__(self, pdb_file_path: str, auth_id_to_label_seq_id: Dict[Tuple[str, int], int] = None,
-                 label_seq_id_to_full_seq_idx: Dict[Tuple[str, int], int] = None,
-                 original_structure: Structure.Structure = None):
+class ModellerPredictor(LoopPredictor):
+    """Loop prediction using Modeller"""
+    
+    def __init__(self, pdb_file_path: str):
+        super().__init__(pdb_file_path)
         if not MODELLER_AVAILABLE:
             raise ImportError("Modeller is not available. Please install it from https://salilab.org/modeller/")
-            
-        self.pdb_file_path = pdb_file_path
-        self.env = Environ()
         
-        # Set up Modeller environment
+        self.env = modeller.Environ()
         self.env.io.atom_files_directory = [os.path.dirname(os.path.abspath(pdb_file_path)), '.', '../atom_files']
-        print("\n=== Modeller Environment Setup ===")
-        print(f"PDB file path: {self.pdb_file_path}")
-        print(f"Absolute PDB file path: {os.path.abspath(self.pdb_file_path)}")
-        print(f"Atom files directories: {self.env.io.atom_files_directory}")
-        
-        # Enable verbose output
-        self.env.io.hetatm = True  # Include HETATM records
-        self.env.io.water = True   # Include water molecules
-        self.env.libs.topology.read('${LIB}/top_heav.lib')  # read topology
-        self.env.libs.parameters.read('${LIB}/par.lib')     # read parameters
-        
-        # Set output level
-        log.verbose()
-        
+        self.env.io.hetatm = True
+        self.env.io.water = True
+        self.env.libs.topology.read('${LIB}/top_heav.lib')
+        self.env.libs.parameters.read('${LIB}/par.lib')
+        modeller.log.verbose()
         self.temp_dir = tempfile.mkdtemp()
-        print(f"Temporary directory: {self.temp_dir}")
-        
-        # Store sequence mappings
-        self.auth_id_to_label_seq_id = auth_id_to_label_seq_id or {}
-        self.label_seq_id_to_full_seq_idx = label_seq_id_to_full_seq_idx or {}
-        
-        # Store the Biopython structure
-        self.original_structure = original_structure
-        
+
+    def generate_conformations(self, region: MissingRegion, num_conformations: int = 2) -> List[Dict]:
+        """Generate conformations using Modeller"""
+        return self.predict_loop(region, num_conformations)
+
     def _create_alignment_file(self, region: MissingRegion, template_seq: str) -> Tuple[str, str]:
         """Create an alignment file for Modeller using the validated MissingRegion data"""
         alignment_file = os.path.join(self.temp_dir, 'alignment.ali')
@@ -101,7 +83,7 @@ class ModellerLoopPredictor:
         
         # Save the structure in PDB format
         io = PDBIO()
-        io.set_structure(self.original_structure)
+        io.set_structure(self.structure)
         io.save(template_pdb_path)
         print(f"Saved template structure as: {template_pdb_path}")
         
@@ -115,7 +97,7 @@ class ModellerLoopPredictor:
         
         # Get the chain from the structure
         chain_obj_in_pdb = None
-        for model in self.original_structure:
+        for model in self.structure:
             for chain in model:
                 if chain.id == region.chain_id:
                     chain_obj_in_pdb = chain
@@ -421,7 +403,7 @@ class ModellerLoopPredictor:
         new_structure.add(new_model)
         
         # Copy all chains from the original structure
-        for chain in self.original_structure[0]:
+        for chain in self.structure[0]:
             new_chain = Chain.Chain(chain.id)
             new_model.add(new_chain)
             
