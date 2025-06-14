@@ -22,6 +22,32 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from .base_loop_predictor import LoopPredictor, MissingRegion
 
+# Configure logging
+def setup_logging(prediction_dir: Path) -> logging.Logger:
+    """Set up logging to write to a file in the prediction directory"""
+    log_file = prediction_dir / "prediction.log"
+    logger = logging.getLogger("modeller_predictor")
+    logger.setLevel(logging.DEBUG)
+    
+    # Create file handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    
+    # Create console handler with a higher log level
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    
+    # Create formatter and add it to the handlers
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # Add the handlers to the logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
 # Try to import Modeller, but don't fail if it's not available
 MODELLER_AVAILABLE = False
 try:
@@ -66,7 +92,8 @@ class ModellerPredictor(LoopPredictor):
         self.env.libs.topology.read('${LIB}/top_heav.lib')
         self.env.libs.parameters.read('${LIB}/par.lib')
         modeller.log.verbose()
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.logger = None  # Will be initialized in predict_loop
 
     def generate_conformations(self, region: MissingRegion, num_conformations: int = 2) -> List[Dict]:
         """Generate conformations using Modeller"""
@@ -265,8 +292,6 @@ class ModellerPredictor(LoopPredictor):
         if not MODELLER_AVAILABLE:
             raise ImportError("Modeller is not available. Please install it from https://salilab.org/modeller/")
         
-        print("\n=== Starting Modeller Loop Prediction ===")
-        
         # Create predictions directory if it doesn't exist
         predictions_dir = Path('predictions')
         predictions_dir.mkdir(exist_ok=True)
@@ -274,7 +299,11 @@ class ModellerPredictor(LoopPredictor):
         # Create a subdirectory for this specific prediction
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         prediction_dir = predictions_dir / f"loop_prediction_{timestamp}"
-        prediction_dir.mkdir(exist_ok=True)
+        prediction_dir.mkdir(exist_ok=True, parents=True)  # Add parents=True to create all necessary parent directories
+        
+        # Set up logging for this prediction
+        self.logger = setup_logging(prediction_dir)
+        self.logger.info("=== Starting Modeller Loop Prediction ===")
         
         # Save current directory and change to prediction directory
         original_dir = os.getcwd()
@@ -286,19 +315,19 @@ class ModellerPredictor(LoopPredictor):
             
             # Create alignment file and get template ID
             alignment_file, template_pdb_id = self._create_alignment_file(region, region.full_chain_sequence)
-            print(f"Using template ID: {template_pdb_id}")
+            self.logger.info(f"Using template ID: {template_pdb_id}")
             
             # Get gap indices from the alignment file
             with open(alignment_file, 'r') as f:
                 lines = f.readlines()
                 template_seq = ''.join(line.strip() for line in lines if not line.startswith('>') and not ':' in line)
                 gap_idxs = self._get_gap_indexes(template_seq)
-                print(f"Gap indices from alignment: {gap_idxs}")
+                self.logger.info(f"Gap indices from alignment: {gap_idxs}")
                 
                 if not gap_idxs:
                     raise ValueError("Could not find gap indices in alignment file")
             
-            print("\n=== Creating Modeller Loop Model ===")
+            self.logger.info("=== Creating Modeller Loop Model ===")
             
             # Create a custom model class that only refines the missing region
             class LoopOnlyModel(LoopModel):
@@ -307,9 +336,9 @@ class ModellerPredictor(LoopPredictor):
                                                       f'{gap_idxs[1]}:A'))
             
             # Initialize the model
-            print("\nInitializing Modeller automodel...")
+            self.logger.info("Initializing Modeller automodel...")
             a = LoopOnlyModel(self.env, 
-                             alnfile=alignment_file,  # Now relative to prediction_dir
+                             alnfile=alignment_file,
                              knowns=template_pdb_id,
                              sequence='model',
                              assess_methods=(assess.DOPE, assess.GA341))
@@ -323,53 +352,88 @@ class ModellerPredictor(LoopPredictor):
             a.loop.ending_model = num_models
             a.loop.md_level = refine.fast
             
-            print("\nStarting model generation...")
-            # Generate models
-            a.make()
+            # Modeller output base name (will be tempdir/basename.D0000000X.pdb)
+            a.basename = self.temp_dir / f"loop_model_{region.chain_id}_{region.start_res}_{region.end_res}"
             
-            print("\nProcessing results...")
-            # Process the results
+            self.logger.debug(f"Running MODELLER for loop {region.chain_id}:{region.start_res}-{region.end_res}")
+            
+            # Create log file in prediction directory
+            modeller_output_log = Path("modeller.log")  # Use relative path since we're already in prediction_dir
+            self.logger.info(f"Creating Modeller output log at: {modeller_output_log}")
+            with open(modeller_output_log, 'w+') as log_f:
+                old_stdout = sys.stdout
+                sys.stdout = log_f 
+                try:
+                    a.make() # Run Modeller
+                except Exception as e:
+                    self.logger.error(f"Modeller failed with error: {e}")
+                    raise
+                finally:
+                    sys.stdout = old_stdout 
+            self.logger.info(f"MODELLER output log saved to {modeller_output_log}")
+            
+            self.logger.info("Processing results...")
+            
+            # Find all generated PDB files
+            generated_pdb_files = list(Path('.').glob('*.BL*.pdb')) + \
+                                list(Path('.').glob('*.DL*.pdb')) 
+                                #list(Path('.').glob('*.B9999*.pdb'))
+            
+            # Sort files based on their numeric suffix to ensure predictable order
+            def get_model_number_from_filename(filepath: Path) -> int:
+                match = re.search(r'\.(\w+?)(\d+)\.pdb$', filepath.name)
+                if match:
+                    # The numbers can be like '0001' so convert to int
+                    return int(match.group(2)) 
+                return 0  # Default if no number found
+                
+            generated_pdb_files.sort(key=get_model_number_from_filename)
+            
+            self.logger.debug(f"Found {len(generated_pdb_files)} generated PDB files by MODELLER.")
+            
             results = []
-            for i in range(1, num_models + 1):
-                model_file = f"model.B{i:05d}.pdb"  # Modeller uses 5 digits
-                if os.path.exists(model_file):
-                    print(f"Processing model {i}...")
-                    # Read the coordinates of the missing region
-                    coords = self._extract_coordinates(model_file, region)
-                    # Create a new structure with the predicted loop inserted
-                    complete_structure = self._insert_loop_into_structure(model_file, region)
-                    
-                    # Save the complete structure
-                    complete_file = f"complete_model_{i}.pdb"
-                    io = PDBIO()
-                    io.set_structure(complete_structure)
-                    io.save(complete_file)
-                    
-                    results.append({
-                        'coordinates': coords,
-                        'quality_score': self._calculate_quality_score(coords, region),
-                        'conformation_id': i,
-                        'complete_structure': complete_structure,
-                        'model_file': str(prediction_dir / model_file),
-                        'complete_file': str(prediction_dir / complete_file)
-                    })
-                    print(f"Processed model {i}")
-                else:
-                    print(f"Warning: Model file {model_file} not found")
-            
+            for i, model_pdb_path in enumerate(generated_pdb_files[:num_models]):  # Process up to num_models requested
+                model_number_from_file = get_model_number_from_filename(model_pdb_path)  # Get model number for score parsing
+                
+                self.logger.info(f"Processing MODELLER model {model_number_from_file} from file: {model_pdb_path}")
+                
+                # Read the coordinates of the missing region
+                coords = self._extract_coordinates(str(model_pdb_path), region)
+                
+                # Parse the complete structure from Modeller's output
+                model_parser = PDBParser()
+                complete_structure = model_parser.get_structure(f'modeller_model_{model_number_from_file}', str(model_pdb_path))
+                
+                # Retrieve MODELLER's quality score for this model
+                quality_score = self._parse_modeller_dope_score(modeller_output_log, model_number=model_number_from_file)
+
+                results.append({
+                    'coordinates': coords,
+                    'complete_structure': complete_structure,
+                    'quality_score': quality_score,
+                    'conformation_id': model_number_from_file,
+                    'model_file': str(model_pdb_path)
+                })
+                
+            if not results:
+                self.logger.warning("No MODELLER models were processed. This might mean Modeller failed, or file patterns are wrong.")
+
             # Save a summary file
             summary = {
                 'timestamp': timestamp,
-                'chain_id': region.chain_id,
-                'start_res': region.start_res,
-                'end_res': region.end_res,
-                'missing_sequence': region.missing_sequence,
+                'region_metadata': {
+                    'chain_id': region.chain_id,
+                    'start_res': region.start_res,
+                    'end_res': region.end_res,
+                    'length': region.length,
+                    'missing_sequence': region.missing_sequence,
+                    'full_chain_sequence': region.full_chain_sequence
+                },
                 'num_models': num_models,
                 'models': [{
                     'model_number': r['conformation_id'],
                     'quality_score': r['quality_score'],
-                    'model_file': os.path.basename(r['model_file']),
-                    'complete_file': os.path.basename(r['complete_file'])
+                    'model_file': r['model_file']
                 } for r in results]
             }
             
@@ -381,18 +445,45 @@ class ModellerPredictor(LoopPredictor):
         finally:
             # Always return to original directory
             os.chdir(original_dir)
+            # Close all handlers
+            if self.logger:
+                for handler in self.logger.handlers[:]:
+                    handler.close()
+                    self.logger.removeHandler(handler)
     
     def _extract_coordinates(self, model_file: str, region: MissingRegion) -> List[np.ndarray]:
         """Extract CA coordinates from the Modeller output file"""
         coords = []
-        with open(model_file) as f:
-            for line in f:
-                if line.startswith('ATOM') and 'CA' in line:
-                    parts = line.split()
-                    res_num = int(parts[5])
-                    if region.start_res <= res_num <= region.end_res:
-                        x, y, z = float(parts[6]), float(parts[7]), float(parts[8])
-                        coords.append(np.array([x, y, z]))
+        self.logger.debug(f"Extracting coordinates from {model_file} for region {region.chain_id}:{region.start_res}-{region.end_res}")
+        
+        try:
+            with open(model_file) as f:
+                for line in f:
+                    if line.startswith('ATOM') and 'CA' in line:
+                        parts = line.split()
+                        if len(parts) >= 9:  # Ensure we have enough parts
+                            try:
+                                # Modeller uses sequential numbering starting from 1
+                                # We need to map this to our target region
+                                res_num = int(parts[5])
+                                # Calculate the offset from the start of our region
+                                offset = res_num - 1  # Modeller starts at 1
+                                if 0 <= offset < region.length:  # Check if this residue is in our target region
+                                    x, y, z = float(parts[6]), float(parts[7]), float(parts[8])
+                                    coords.append(np.array([x, y, z]))
+                                    self.logger.debug(f"Found CA atom for residue {res_num} (offset {offset}) at ({x}, {y}, {z})")
+                            except (ValueError, IndexError) as e:
+                                self.logger.warning(f"Error parsing line in PDB file: {line.strip()} - {e}")
+                                continue
+        except Exception as e:
+            self.logger.error(f"Error reading PDB file {model_file}: {e}")
+            raise
+            
+        if not coords:
+            self.logger.warning(f"No coordinates found in {model_file} for region {region.chain_id}:{region.start_res}-{region.end_res}")
+        else:
+            self.logger.info(f"Extracted {len(coords)} coordinates from {model_file}")
+            
         return coords
     
     def _insert_loop_into_structure(self, model_file: str, region: MissingRegion) -> Structure:
@@ -471,4 +562,49 @@ class ModellerPredictor(LoopPredictor):
         score *= np.exp(-np.std(angles))  # Penalize irregular angles
         score *= np.exp(-np.std(bond_lengths))  # Penalize irregular bond lengths
         
-        return float(score) 
+        return float(score)
+
+    def _parse_modeller_dope_score(self, log_file_path: Path, model_number: int) -> float:
+        """Parses the DOPE score for a specific model from Modeller's log file."""
+        dope_score = -99999.0  # Default low score if not found
+        try:
+            if not log_file_path.exists():
+                self.logger.warning(f"Modeller log file not found at {log_file_path}")
+                return dope_score
+
+            with open(log_file_path, 'r') as f:
+                log_content = f.read()
+                
+                # Modeller logs DOPE score in the V-file and sometimes in the main log for the final models.
+                # A robust way is to check the V-file first.
+                # Fix: Extract last 4 digits from model number for V-file name
+                v_file_number = model_number % 10000  # Get last 4 digits
+                score_v_file = log_file_path.parent / f"model.V9999{v_file_number:04d}"  # e.g., model.V99990002 for model 10002
+                self.logger.debug(f"Looking for V-file at: {score_v_file}")
+                if score_v_file.exists():
+                    try:
+                        with open(score_v_file, 'r') as sf:
+                            for line in sf:
+                                if "DOPE score:" in line:
+                                    match = re.search(r"DOPE score:\s*([-+]?\d*\.\d+|\d+)", line)
+                                    if match:
+                                        dope_score = float(match.group(1))
+                                        self.logger.debug(f"Parsed DOPE score {dope_score} for model {model_number} from V-file {score_v_file}")
+                                        return dope_score
+                    except Exception as e:
+                        self.logger.warning(f"Error parsing DOPE score from V-file {score_v_file}: {e}")
+                else:
+                    self.logger.debug(f"V-file not found at {score_v_file}, falling back to main log")
+                
+                # Fallback to main log file if V-file not found or parsing failed
+                # The DOPE score appears in a simple format: "DOPE score : -31798.841797"
+                match = re.search(r"DOPE score\s*:\s*([-+]?\d*\.\d+|\d+)", log_content)
+                if match:
+                    dope_score = float(match.group(1))
+                    self.logger.debug(f"Parsed DOPE score {dope_score} from main log")
+                else:
+                    self.logger.warning(f"No DOPE score found in log for model {model_number}")
+
+        except Exception as e:
+            self.logger.warning(f"Error reading Modeller log file {log_file_path} for model {model_number}: {e}")
+        return dope_score 
