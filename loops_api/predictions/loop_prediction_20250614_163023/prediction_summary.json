@@ -1,0 +1,9 @@
+{
+  "timestamp": "20250614_163023",
+  "chain_id": "A",
+  "start_res": 599,
+  "end_res": 615,
+  "missing_sequence": "EKSRWSGSHQFEQLS",
+  "num_models": 2,
+  "models": []
+}
