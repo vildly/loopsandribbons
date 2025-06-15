@@ -7,27 +7,13 @@ from Bio.PDB.Polypeptide import is_aa
 from Bio.SeqUtils import seq1
 from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 import logging
-from dataclasses import dataclass
-
-@dataclass
-class MissingRegion:
-    chain_id: str
-    start_res: int
-    end_res: int
-    length: int
-    start_coords: np.ndarray
-    end_coords: np.ndarray
-    start_res_name: str
-    end_res_name: str
-    missing_sequence: str     # The actual 1-letter sequence of the missing residues
-    full_chain_sequence: str  # The complete 1-letter sequence of the chain
-    start_icode: str
-    end_icode: str
+from .missing_region import MissingRegion
+from .prediction_result import ResultWriter, FileResultWriter
 
 class LoopPredictor:
     """Base class for loop prediction methods"""
     
-    def __init__(self, pdb_file_path: str):
+    def __init__(self, pdb_file_path: str, result_writer: Optional[ResultWriter] = None):
         self.pdb_file_path = pdb_file_path
         self.structure = None
         self.cif_dict = {}
@@ -36,6 +22,7 @@ class LoopPredictor:
         self.label_seq_id_to_full_seq_idx: Dict[Tuple[str, int], int] = {}
         self.original_flanking_residues: Dict[Tuple[str, int, str], Residue.Residue] = {}
         self.auth_id_to_label_seq_id: Dict[Tuple[str, int], int] = {}
+        self.result_writer = result_writer or FileResultWriter()
 
     def _get_chain_sequence_from_mmcif(self, chain_id: str) -> Optional[str]:
         """Get the sequence from mmCIF _entity_poly_seq or _struct_ref_seq records"""
@@ -423,45 +410,16 @@ class LoopPredictor:
         raise NotImplementedError("Subclasses must implement generate_conformations")
 
     def save_results(self, output_dir: str) -> None:
-        """Save predicted structures and metadata"""
-        output_dir = Path(output_dir)
-        output_dir.mkdir(exist_ok=True)
-        
-        metadata = {
-            'pdb_file_path': self.pdb_file_path,
-            'missing_regions': [
-                {
-                    'chain_id': region.chain_id,
-                    'start_res': region.start_res,
-                    'end_res': region.end_res,
-                    'length': region.length,
-                    'start_res_name': region.start_res_name,
-                    'end_res_name': region.end_res_name,
-                    'missing_sequence': region.missing_sequence,
-                    'full_chain_sequence': region.full_chain_sequence
-                }
-                for region in self.missing_regions
-            ]
-        }
-        
-        # Save metadata
-        with open(output_dir / 'metadata.json', 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        # Save each conformation
-        for i, region in enumerate(self.missing_regions):
-            conformations = self.generate_conformations(region)
-            for conf in conformations:
-                # Save the loop coordinates
-                loop_file = output_dir / f'region_{i}_conf_{conf["conformation_id"]}_loop.pdb'
-                self._write_conformation(loop_file, region, conf)
-                
-                # Save the complete structure if available
-                if 'complete_structure' in conf:
-                    complete_file = output_dir / f'region_{i}_conf_{conf["conformation_id"]}_complete.pdb'
-                    io = PDBIO()
-                    io.set_structure(conf['complete_structure'])
-                    io.save(str(complete_file))
+        """Save predicted structures and metadata using the configured result writer"""
+        if not hasattr(self, 'missing_regions'):
+            raise ValueError("No missing regions found. Call find_missing_regions() first.")
+            
+        conformations = []
+        for region in self.missing_regions:
+            region_conformations = self.generate_conformations(region)
+            conformations.extend(region_conformations)
+            
+        self.result_writer.write_results(output_dir, self.pdb_file_path, self.missing_regions, conformations)
 
     def _write_conformation(self, output_file: Path, region: MissingRegion, conf: Dict) -> None:
         """Write a conformation to a PDB file"""

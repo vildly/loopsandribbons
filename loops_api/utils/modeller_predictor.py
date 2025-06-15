@@ -21,6 +21,7 @@ import json
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from .base_loop_predictor import LoopPredictor, MissingRegion
+from .prediction_result import FileResultWriter
 
 # Configure logging
 def setup_logging(prediction_dir: Path) -> logging.Logger:
@@ -81,7 +82,7 @@ class ModellerPredictor(LoopPredictor):
     """Loop prediction using Modeller"""
     
     def __init__(self, pdb_file_path: str):
-        super().__init__(pdb_file_path)
+        super().__init__(pdb_file_path, result_writer=FileResultWriter())
         if not MODELLER_AVAILABLE:
             raise ImportError("Modeller is not available. Please install it from https://salilab.org/modeller/")
         
@@ -292,14 +293,8 @@ class ModellerPredictor(LoopPredictor):
         if not MODELLER_AVAILABLE:
             raise ImportError("Modeller is not available. Please install it from https://salilab.org/modeller/")
         
-        # Create predictions directory if it doesn't exist
-        predictions_dir = Path('predictions')
-        predictions_dir.mkdir(exist_ok=True)
-        
-        # Create a subdirectory for this specific prediction
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        prediction_dir = predictions_dir / f"loop_prediction_{timestamp}"
-        prediction_dir.mkdir(exist_ok=True, parents=True)  # Add parents=True to create all necessary parent directories
+        # Create a prediction directory using the result writer
+        prediction_dir = self.result_writer._create_prediction_dir()
         
         # Set up logging for this prediction
         self.logger = setup_logging(prediction_dir)
@@ -352,13 +347,13 @@ class ModellerPredictor(LoopPredictor):
             a.loop.ending_model = num_models
             a.loop.md_level = refine.fast
             
-            # Modeller output base name (will be tempdir/basename.D0000000X.pdb)
-            a.basename = self.temp_dir / f"loop_model_{region.chain_id}_{region.start_res}_{region.end_res}"
+            # Modeller output base name (will be prediction_dir/basename.D0000000X.pdb)
+            a.basename = f"loop_model_{region.chain_id}_{region.start_res}_{region.end_res}"
             
             self.logger.debug(f"Running MODELLER for loop {region.chain_id}:{region.start_res}-{region.end_res}")
             
             # Create log file in prediction directory
-            modeller_output_log = Path("modeller.log")  # Use relative path since we're already in prediction_dir
+            modeller_output_log = Path("modeller.log")
             self.logger.info(f"Creating Modeller output log at: {modeller_output_log}")
             with open(modeller_output_log, 'w+') as log_f:
                 old_stdout = sys.stdout
@@ -409,29 +404,9 @@ class ModellerPredictor(LoopPredictor):
                 
             if not results:
                 self.logger.warning("No MODELLER models were processed. This might mean Modeller failed, or file patterns are wrong.")
-
-            # Save a summary file
-            summary = {
-                'timestamp': timestamp,
-                'region_metadata': {
-                    'chain_id': region.chain_id,
-                    'start_res': region.start_res,
-                    'end_res': region.end_res,
-                    'length': region.length,
-                    'missing_sequence': region.missing_sequence,
-                    'full_chain_sequence': region.full_chain_sequence
-                },
-                'num_models': num_models,
-                'models': [{
-                    'model_number': r['conformation_id'],
-                    'quality_score': r['quality_score'],
-                    'ga341_score': r['ga341_score'],
-                    'model_file': r['model_file']
-                } for r in results]
-            }
             
-            with open("prediction_summary.json", 'w') as f:
-                json.dump(summary, f, indent=2)
+            # Write results using the result writer
+            self.result_writer.write_results(prediction_dir, self.pdb_file_path, region, results)
             
             return results
             
