@@ -16,7 +16,6 @@ from modeller.automodel import LoopModel
 from modeller.optimizers import molecular_dynamics
 import datetime
 import json
-import math
 
 # Add the parent directory to sys.path
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -288,51 +287,6 @@ class ModellerPredictor(LoopPredictor):
         print(f"Gap indices: {[start_idx, end_idx]}")
         return [start_idx, end_idx]
         
-    def _calculate_quality_score(self, coords: List[np.ndarray], region: MissingRegion) -> float:
-        """Calculate a quality score for the predicted loop"""
-        if not coords:
-            return 0.0
-            
-        # Check distance from start/end points
-        start_dist = np.linalg.norm(coords[0] - region.start_coords)
-        end_dist = np.linalg.norm(coords[-1] - region.end_coords)
-        
-        # Check smoothness (angle between consecutive segments)
-        angles = []
-        for i in range(len(coords) - 2):
-            v1 = coords[i+1] - coords[i]
-            v2 = coords[i+2] - coords[i+1]
-            angle = np.arccos(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
-            angles.append(angle)
-        
-        # Check bond lengths
-        bond_lengths = [np.linalg.norm(coords[i+1] - coords[i]) for i in range(len(coords)-1)]
-        
-        # Calculate score (higher is better)
-        score = 1.0
-        score *= np.exp(-start_dist - end_dist)  # Penalize large distances from endpoints
-        score *= np.exp(-np.std(angles))  # Penalize irregular angles
-        score *= np.exp(-np.std(bond_lengths))  # Penalize irregular bond lengths
-        
-        return float(score)
-
-    def _check_ramachandran(self, structure: Structure, region: MissingRegion) -> Dict:
-        """Return a dummy Ramachandran score.
-        
-        Returns a dictionary with:
-        - favored: dummy count of residues in favored regions
-        - allowed: dummy count of residues in allowed regions
-        - outliers: dummy count of residues in disfavored regions
-        - score: dummy normalized score (1.0 = all favored, 0.0 = all outliers)
-        """
-        # Return dummy values
-        return {
-            'favored': region.length - 1,  # Assume most residues are favored
-            'allowed': 1,  # Assume one residue is in allowed region
-            'outliers': 0,  # Assume no outliers
-            'score': 0.95  # Assume high quality
-        }
-
     def predict_loop(self, region: MissingRegion, num_models: int = 5) -> List[Dict]:
         """Predict loop structure using Modeller"""
         if not MODELLER_AVAILABLE:
@@ -345,7 +299,7 @@ class ModellerPredictor(LoopPredictor):
         # Create a subdirectory for this specific prediction
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         prediction_dir = predictions_dir / f"loop_prediction_{timestamp}"
-        prediction_dir.mkdir(exist_ok=True, parents=True)
+        prediction_dir.mkdir(exist_ok=True, parents=True)  # Add parents=True to create all necessary parent directories
         
         # Set up logging for this prediction
         self.logger = setup_logging(prediction_dir)
@@ -398,13 +352,13 @@ class ModellerPredictor(LoopPredictor):
             a.loop.ending_model = num_models
             a.loop.md_level = refine.fast
             
-            # Modeller output base name
+            # Modeller output base name (will be tempdir/basename.D0000000X.pdb)
             a.basename = self.temp_dir / f"loop_model_{region.chain_id}_{region.start_res}_{region.end_res}"
             
             self.logger.debug(f"Running MODELLER for loop {region.chain_id}:{region.start_res}-{region.end_res}")
             
             # Create log file in prediction directory
-            modeller_output_log = Path("modeller.log")
+            modeller_output_log = Path("modeller.log")  # Use relative path since we're already in prediction_dir
             self.logger.info(f"Creating Modeller output log at: {modeller_output_log}")
             with open(modeller_output_log, 'w+') as log_f:
                 old_stdout = sys.stdout
@@ -422,43 +376,37 @@ class ModellerPredictor(LoopPredictor):
             
             # Get list of successfully built models
             ok_models = [x for x in a.outputs if x['failure'] is None]
-            self.logger.info(f"Successfully built {len(ok_models)} models")
             
             # Sort models by DOPE score
             ok_models.sort(key=lambda x: x['DOPE score'])
             
             results = []
-            for i, model in enumerate(ok_models):
+            for i, model in enumerate(ok_models[:num_models]):
+                model_pdb_path = Path(model['name'])
                 model_number = i + 1
-                model_file = model['name']
                 
-                # Get scores with defaults if not available
-                dope_score = model.get('DOPE score', 0.0)
-                ga341_score = model.get('GA341 score', 0.0)
-                
-                self.logger.info(f"Processing model {model_number}: {model_file}")
-                self.logger.info(f"DOPE score: {dope_score}, GA341 score: {ga341_score}")
+                self.logger.info(f"Processing MODELLER model {model_number} from file: {model_pdb_path}")
                 
                 # Read the coordinates of the missing region
-                coords = self._extract_coordinates(str(model_file), region)
+                coords = self._extract_coordinates(str(model_pdb_path), region)
                 
                 # Parse the complete structure from Modeller's output
                 model_parser = PDBParser()
-                complete_structure = model_parser.get_structure(f'modeller_model_{model_number}', str(model_file))
+                complete_structure = model_parser.get_structure(f'modeller_model_{model_number}', str(model_pdb_path))
                 
-                # Add Ramachandran analysis
-                ramachandran = self._check_ramachandran(complete_structure, region)
-                
+                # Get quality scores directly from Modeller's output
+                quality_score = model['DOPE score']
+                ga341_score = model.get('GA341 score', 0.0)  # GA341 score might not be present
+
                 results.append({
                     'coordinates': coords,
                     'complete_structure': complete_structure,
-                    'quality_score': dope_score,  # Use DOPE score as quality score
-                    'ga341_score': ga341_score,  # Add GA341 score
+                    'quality_score': quality_score,
+                    'ga341_score': ga341_score,
                     'conformation_id': model_number,
-                    'model_file': str(model_file),
-                    'ramachandran': ramachandran
+                    'model_file': str(model_pdb_path)
                 })
-            
+                
             if not results:
                 self.logger.warning("No MODELLER models were processed. This might mean Modeller failed, or file patterns are wrong.")
 
@@ -478,8 +426,7 @@ class ModellerPredictor(LoopPredictor):
                     'model_number': r['conformation_id'],
                     'quality_score': r['quality_score'],
                     'ga341_score': r['ga341_score'],
-                    'model_file': r['model_file'],
-                    'ramachandran': r['ramachandran']
+                    'model_file': r['model_file']
                 } for r in results]
             }
             
@@ -532,52 +479,58 @@ class ModellerPredictor(LoopPredictor):
             
         return coords
     
-    def _insert_loop_into_structure(self, model_file: str, region: MissingRegion) -> Structure:
-        """Insert the predicted loop into the original structure"""
-        # Create a copy of the original structure
-        new_structure = Structure.Structure('complete')
-        new_model = Model.Model(0)
-        new_structure.add(new_model)
-        
-        # Copy all chains from the original structure
-        for chain in self.structure[0]:
-            new_chain = Chain.Chain(chain.id)
-            new_model.add(new_chain)
-            
-            # Copy all residues from the original chain
-            for residue in chain:
-                if not (chain.id == region.chain_id and 
-                       region.start_res < residue.id[1] < region.end_res):
-                    new_chain.add(residue.copy())
-        
-        # Add the predicted loop residues
-        target_chain = new_model[region.chain_id]
-        with open(model_file) as f:
-            current_residue = None
-            for line in f:
-                if line.startswith('ATOM'):
-                    parts = line.split()
-                    res_num = int(parts[5])
-                    if region.start_res <= res_num <= region.end_res:
-                        if current_residue is None or current_residue.id[1] != res_num:
-                            # Create new residue
-                            current_residue = Residue.Residue(
-                                (' ', res_num, ' '),
-                                parts[3],  # resname
-                                parts[4]   # segid
-                            )
-                            target_chain.add(current_residue)
-                        
-                        # Add atom to current residue
-                        atom = Atom.Atom(
-                            parts[2],  # name
-                            np.array([float(parts[6]), float(parts[7]), float(parts[8])]),
-                            float(parts[9]),  # occupancy
-                            float(parts[10]),  # bfactor
-                            parts[2],  # altloc
-                            parts[2],  # fullname
-                            int(parts[1])  # serial number
-                        )
-                        current_residue.add(atom)
-        
-        return new_structure 
+    def _parse_modeller_dope_score(self, log_file_path: Path, model_number: int) -> float:
+        """Parses the DOPE score for a specific model from Modeller's log file."""
+        dope_score = -99999.0  # Default low score if not found
+        try:
+            if not log_file_path.exists():
+                self.logger.warning(f"Modeller log file not found at {log_file_path}")
+                return dope_score
+
+            with open(log_file_path, 'r') as f:
+                log_content = f.read()
+                
+                # Modeller logs DOPE score in the V-file and sometimes in the main log for the final models.
+                # A robust way is to check the V-file first.
+                # Fix: Extract last 4 digits from model number for V-file name
+                v_file_number = model_number % 10000  # Get last 4 digits
+                score_v_file = log_file_path.parent / f"model.V9999{v_file_number:04d}"  # e.g., model.V99990002 for model 10002
+                self.logger.debug(f"Looking for V-file at: {score_v_file}")
+                if score_v_file.exists():
+                    try:
+                        with open(score_v_file, 'r') as sf:
+                            for line in sf:
+                                if "DOPE score:" in line:
+                                    match = re.search(r"DOPE score:\s*([-+]?\d*\.\d+|\d+)", line)
+                                    if match:
+                                        dope_score = float(match.group(1))
+                                        self.logger.debug(f"Parsed DOPE score {dope_score} for model {model_number} from V-file {score_v_file}")
+                                        return dope_score
+                    except Exception as e:
+                        self.logger.warning(f"Error parsing DOPE score from V-file {score_v_file}: {e}")
+                else:
+                    self.logger.debug(f"V-file not found at {score_v_file}, falling back to main log")
+                
+                # Fallback to main log file if V-file not found or parsing failed
+                # Search for specific model output lines in the log
+                # Example log line: "filename: loop_model_B_597_614.D00000001.pdb ... DOPE score: -1234.567"
+                
+                # Regex for final assessment of a specific model number, covering D, B, BL, DL prefixes
+                model_specific_pattern = r"filename:\s*" + re.escape(log_file_path.stem.split('.')[0]) + r"\.([DB]|BL|DL)\d{7}" + re.escape(str(model_number)) + r"\.pdb.*?DOPE score:\s*([-+]?\d*\.\d+|\d+)"
+                
+                match = re.search(model_specific_pattern, log_content, re.DOTALL)
+                if match:
+                    dope_score = float(match.group(2))  # Group 2 is the score
+                    self.logger.debug(f"Parsed DOPE score {dope_score} for model {model_number} from main log")
+                else:
+                    # Fallback: Find the last overall DOPE score if model-specific not found
+                    matches = list(re.finditer(r'>>DOPE score:\s+(-?\d+\.\d+)', log_content))
+                    if matches:
+                        dope_score = float(matches[-1].group(1))  # Get the last one
+                        self.logger.debug(f"Parsed last overall DOPE score {dope_score} from log (not model specific)")
+                    else:
+                        self.logger.warning(f"No DOPE score found in log for model {model_number}")
+
+        except Exception as e:
+            self.logger.warning(f"Error reading Modeller log file {log_file_path} for model {model_number}: {e}")
+        return dope_score 
