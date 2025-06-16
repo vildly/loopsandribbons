@@ -55,6 +55,17 @@ uv pip install -e .
 - NumPy
 - Modeller (optional, for Modeller-based predictions)
 
+## Current Usage
+
+After installing the dependencies using `uv`, you can run the test script to see the current functionality in action:
+
+```bash
+# Run the test script
+python loops_api/test_loop_predictor.py
+```
+
+This will execute the test suite, demonstrating the current features and generating example outputs in the `predictions/` directory. The results, including PDB files and summary JSONs, will be available in the `predictions/` directory.
+
 ## Project Structure 📁
 
 ```
