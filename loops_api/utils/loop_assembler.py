@@ -6,61 +6,20 @@ from Bio.PDB.Polypeptide import is_aa
 from Bio.SeqUtils import seq1
 import numpy as np
 
+from .base_loop_predictor import LoopPredictor
+
 class LoopAssembler:
     """Handles assembly of loop predictions into complete structures with correct numbering"""
     
-    def __init__(self, original_structure: Structure):
-        """Initialize with the original structure"""
-        self.original_structure = original_structure
-        self.label_seq_id_to_auth_id_and_icode: Dict[Tuple[str, int], Tuple[int, str]] = {}
-        self.auth_id_to_label_seq_id: Dict[Tuple[str, int], int] = {}
-        self.logger = logging.getLogger("loop_assembler")
-        
-    def build_sequence_mappings(self, chain_id: str, first_auth_seq_id: int, last_auth_seq_id: int) -> None:
-        """Build mappings between label_seq_id and auth_seq_id for a chain
+    def __init__(self, predictor: LoopPredictor):
+        """Initialize with the predictor that has the sequence mappings
         
         Args:
-            chain_id: The chain ID to build mappings for
-            first_auth_seq_id: First auth_seq_id in the chain
-            last_auth_seq_id: Last auth_seq_id in the chain
+            predictor: A LoopPredictor instance that has built sequence mappings
         """
-        # Get the chain from the original structure
-        chain = None
-        for model in self.original_structure:
-            if chain_id in model:
-                chain = model[chain_id]
-                break
-                
-        if not chain:
-            raise ValueError(f"Chain {chain_id} not found in original structure")
-            
-        # Build the mapping for observed residues
-        current_label_seq_id = 1
-        for residue in sorted(chain.get_residues(), key=lambda r: r.id[1]):
-            if is_aa(residue):
-                auth_seq_id = residue.id[1]
-                auth_icode = residue.id[2]
-                
-                # Store both mappings
-                self.label_seq_id_to_auth_id_and_icode[(chain_id, current_label_seq_id)] = (auth_seq_id, auth_icode)
-                self.auth_id_to_label_seq_id[(chain_id, auth_seq_id)] = current_label_seq_id
-                
-                current_label_seq_id += 1
-                
-        # For missing residues within the range, extend the mapping linearly
-        for auth_seq_id in range(first_auth_seq_id, last_auth_seq_id + 1):
-            if (chain_id, auth_seq_id) not in self.auth_id_to_label_seq_id:
-                # Find the next available label_seq_id
-                while (chain_id, current_label_seq_id) in self.label_seq_id_to_auth_id_and_icode:
-                    current_label_seq_id += 1
-                    
-                # Add the mapping for this missing residue
-                self.label_seq_id_to_auth_id_and_icode[(chain_id, current_label_seq_id)] = (auth_seq_id, ' ')
-                self.auth_id_to_label_seq_id[(chain_id, auth_seq_id)] = current_label_seq_id
-                current_label_seq_id += 1
-                
-        self.logger.info(f"Built sequence mappings for chain {chain_id}")
-        self.logger.debug(f"Number of mappings: {len(self.label_seq_id_to_auth_id_and_icode)}")
+        self.predictor = predictor
+        self.original_structure = predictor.structure
+        self.logger = logging.getLogger("loop_assembler")
         
     def assemble_structure(self, model_structure: Structure, region_chain_id: str, 
                           first_auth_seq_id: int, last_auth_seq_id: int) -> Structure:
@@ -75,61 +34,80 @@ class LoopAssembler:
         Returns:
             A new Structure object containing the assembled structure
         """
+        print(f"[LoopAssembler] Assembling structure for chain {region_chain_id}, region {first_auth_seq_id}-{last_auth_seq_id}")
         # Create new structure
         new_structure = Structure.Structure("assembled")
         new_model = Model.Model(0)
         new_structure.add(new_model)
-        
-        # Process each chain in the original structure
+
+        # Copy all chains from the original structure
+        original_chains = {}
         for model in self.original_structure:
-            for chain_id, chain in model.child_dict.items():
-                if chain_id != region_chain_id:
-                    # For non-modeled chains, copy everything
-                    new_chain = Chain.Chain(chain_id)
-                    for residue in chain:
-                        new_chain.add(residue.copy())
-                    new_model.add(new_chain)
-                else:
-                    # For the modeled chain, only copy HETATMs and residues outside the region
-                    new_chain = Chain.Chain(chain_id)
-                    for residue in chain:
-                        if not is_aa(residue) or residue.id[1] < first_auth_seq_id or residue.id[1] > last_auth_seq_id:
-                            new_chain.add(residue.copy())
-                    new_model.add(new_chain)
-        
-        # Get the modeled chain and renumber it
+            for chain in model:
+                print(f"[LoopAssembler] Copying chain {chain.id} from original structure with {len(list(chain))} residues")
+                # Deep copy all chains
+                new_chain = Chain.Chain(chain.id)
+                for residue in chain:
+                    new_chain.add(residue.copy())
+                new_model.add(new_chain)
+                original_chains[chain.id] = new_chain
+
+        # Identify the modeled chain in the MODELLER output (usually only one chain, or chain A)
         modeled_chain = None
         for model in model_structure:
-            if region_chain_id in model:
-                modeled_chain = model[region_chain_id]
+            chains = list(model)
+            print(f"[LoopAssembler] MODELLER output chains: {[c.id for c in chains]}")
+            if len(chains) == 1:
+                modeled_chain = chains[0]
+                print(f"[LoopAssembler] Using only chain in model: {modeled_chain.id}")
                 break
-                
+            for chain in chains:
+                if chain.id in ("A", "", region_chain_id):
+                    modeled_chain = chain
+                    print(f"[LoopAssembler] Selected modeled chain: {chain.id}")
+                    break
+            if modeled_chain:
+                break
         if not modeled_chain:
-            raise ValueError(f"Modeled chain {region_chain_id} not found in model structure")
-            
-        # Create a new chain for the modeled region
-        new_modeled_chain = Chain.Chain(region_chain_id)
-        
-        # Add and renumber the modeled residues
-        for residue in modeled_chain:
-            if is_aa(residue):
-                # Get the label_seq_id for this position
-                label_seq_id = residue.id[1]  # Modeller uses 1-based numbering
-                
-                # Get the corresponding auth_seq_id and icode
-                if (region_chain_id, label_seq_id) in self.label_seq_id_to_auth_id_and_icode:
-                    auth_seq_id, auth_icode = self.label_seq_id_to_auth_id_and_icode[(region_chain_id, label_seq_id)]
-                    
-                    # Create new residue with correct numbering
-                    new_residue = Residue.Residue((auth_seq_id, auth_icode, ' '), residue.resname, residue.segid)
-                    
-                    # Copy all atoms
-                    for atom in residue:
-                        new_residue.add(atom.copy())
-                        
-                    new_modeled_chain.add(new_residue)
-                    
-        # Add the renumbered modeled chain
-        new_model.add(new_modeled_chain)
-        
+            raise ValueError(f"Modeled chain not found in model structure (checked for chain A, blank, or {region_chain_id})")
+
+        # Patch only the missing region residues in the modeled chain into the correct chain in the new structure
+        chain_to_patch = original_chains.get(region_chain_id)
+        if not chain_to_patch:
+            raise ValueError(f"Chain {region_chain_id} not found in original structure")
+        # Remove residues in the missing region
+        residues_to_remove = [res for res in chain_to_patch if is_aa(res) and first_auth_seq_id <= res.id[1] <= last_auth_seq_id]
+        print(f"[LoopAssembler] Removing {len(residues_to_remove)} residues from chain {region_chain_id} in region {first_auth_seq_id}-{last_auth_seq_id}")
+        for res in residues_to_remove:
+            print(f"[LoopAssembler] Removing residue: {res.resname} {res.id}")
+            chain_to_patch.detach_child(res.id)
+
+        # --- NEW LOGIC: Map modeller_rel_res_id to label_seq_id to auth_seq_id/auth_icode ---
+        # Find the first label_seq_id for the missing region in the mapping
+        # This is the minimum label_seq_id that maps to an auth_seq_id in the missing region
+        label_seq_ids_in_region = [label_seq_id for (chain, label_seq_id), (auth_seq_id, _) in self.predictor.label_seq_id_to_auth_id_and_icode.items()
+                                   if chain == region_chain_id and first_auth_seq_id <= auth_seq_id <= last_auth_seq_id]
+        if not label_seq_ids_in_region:
+            raise ValueError(f"No label_seq_ids found for chain {region_chain_id} in region {first_auth_seq_id}-{last_auth_seq_id}")
+        first_resolved_label_id_of_segment = min(label_seq_ids_in_region)
+        print(f"[LoopAssembler] first_resolved_label_id_of_segment: {first_resolved_label_id_of_segment}")
+
+        # Add/replace residues from the modeled chain, renumbering as needed
+        for res in modeled_chain:
+            if is_aa(res):
+                modeller_rel_res_id = res.get_id()[1]  # 1-based in MODELLER output
+                corresponding_label_seq_id = first_resolved_label_id_of_segment + (modeller_rel_res_id - 1)
+                try:
+                    auth_seq_id, auth_icode = self.predictor.get_auth_seq_id(region_chain_id, corresponding_label_seq_id)
+                    if first_auth_seq_id <= auth_seq_id <= last_auth_seq_id:
+                        print(f"[LoopAssembler] Adding residue: modeller_rel_res_id={modeller_rel_res_id}, label_seq_id={corresponding_label_seq_id}, auth_seq_id={auth_seq_id}, auth_icode={auth_icode}, resname={res.resname}")
+                        # Create new residue with correct numbering
+                        new_residue = Residue.Residue((" ", auth_seq_id, auth_icode), res.resname, res.segid)
+                        for atom in res:
+                            new_residue.add(atom.copy())
+                        chain_to_patch.add(new_residue)
+                except ValueError as e:
+                    print(f"[LoopAssembler] Skipping residue {modeller_rel_res_id} (label_seq_id {corresponding_label_seq_id}): {e}")
+
+        print(f"[LoopAssembler] Finished assembling structure.")
         return new_structure 

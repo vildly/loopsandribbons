@@ -8,6 +8,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from utils.base_loop_predictor import LoopPredictor, MissingRegion
 from utils.simple_predictor import SimplePredictor
 from utils.modeller_predictor import ModellerPredictor, MODELLER_AVAILABLE
+from utils.loop_assembler import LoopAssembler
 
 import requests
 import tempfile
@@ -18,6 +19,7 @@ from Bio.SeqUtils import seq1
 from Bio.PDB.Polypeptide import is_aa
 from Bio.PDB.PDBParser import PDBParser
 from Bio.PDB.MMCIFParser import MMCIFParser
+from Bio.PDB.PDBIO import PDBIO
 
 # Add Modeller path if available
 if MODELLER_AVAILABLE:
@@ -204,6 +206,47 @@ def test_simple_predictions(pdb_id: str):
         print(f"Error during testing: {e}")
         raise
 
+def test_loop_assembler_on_modeller_output(pdb_id: str):
+    """Test assembling a new structure from a Modeller output using LoopAssembler"""
+    if not MODELLER_AVAILABLE:
+        print("Modeller is not available. Skipping LoopAssembler test.")
+        return
+
+    # Get the structure file and run Modeller to generate outputs
+    pdb_file = get_pdb_file(pdb_id)
+    predictor = ModellerPredictor(pdb_file)
+    predictor.load_structure()
+    missing_regions = predictor.find_missing_regions()
+    if not missing_regions:
+        print(f"No missing regions found in {pdb_id}, skipping LoopAssembler test.")
+        return
+    region = missing_regions[0]
+    conformations = predictor.generate_conformations(region, num_conformations=1)
+    if not conformations:
+        print("No conformations generated, skipping LoopAssembler test.")
+        return
+    # Get the first conformation's complete structure
+    model_structure = conformations[0]['complete_structure']
+    print(f"model_structure: {model_structure}")
+
+    # Build sequence mappings for the region
+    predictor.build_sequence_mappings(region.chain_id, region.start_res + 1, region.end_res - 1)
+
+    # Assemble the new structure
+    assembler = LoopAssembler(predictor)
+    assembled_structure = assembler.assemble_structure(
+        model_structure,
+        region.chain_id,
+        region.start_res + 1,
+        region.end_res - 1
+    )
+    # Save the assembled structure to a file for inspection
+    output_path = Path("predictions") / f"{pdb_id}_assembled.pdb"
+    io = PDBIO()
+    io.set_structure(assembled_structure)
+    io.save(str(output_path))
+    print(f"Assembled structure saved to {output_path}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test loop predictors with a given PDB ID.")
     parser.add_argument('--pdb_id', type=str, default='3IDP', help='PDB ID to use for testing (default: 3IDP)')
@@ -211,6 +254,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.predictor == 'modeller':
-        test_modeller_predictions(args.pdb_id)
+        #test_modeller_predictions(args.pdb_id)
+        test_loop_assembler_on_modeller_output(args.pdb_id)
     else:
         test_simple_predictions(args.pdb_id) 

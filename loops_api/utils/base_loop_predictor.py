@@ -23,6 +23,11 @@ class LoopPredictor:
         self.original_flanking_residues: Dict[Tuple[str, int, str], Residue.Residue] = {}
         self.auth_id_to_label_seq_id: Dict[Tuple[str, int], int] = {}
         self.result_writer = result_writer or FileResultWriter()
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Sequence mapping dictionaries
+        self.label_seq_id_to_auth_id_and_icode: Dict[Tuple[str, int], Tuple[int, str]] = {}
+        self.auth_id_to_label_seq_id: Dict[Tuple[str, int], int] = {}
 
     def _get_chain_sequence_from_mmcif(self, chain_id: str) -> Optional[str]:
         """Get the sequence from mmCIF _entity_poly_seq or _struct_ref_seq records"""
@@ -426,4 +431,81 @@ class LoopPredictor:
             f.write(f"REMARK  Quality score: {conf['quality_score']:.3f}\n")
             for i, coord in enumerate(conf['coordinates']):
                 res_num = region.start_res + i + 1
-                f.write(f"ATOM  {i+1:5d}  CA  ALA {region.chain_id}{res_num:4d}    {coord[0]:8.3f}{coord[1]:8.3f}{coord[2]:8.3f}\n") 
+                f.write(f"ATOM  {i+1:5d}  CA  ALA {region.chain_id}{res_num:4d}    {coord[0]:8.3f}{coord[1]:8.3f}{coord[2]:8.3f}\n")
+
+    def build_sequence_mappings(self, chain_id: str, first_auth_seq_id: int, last_auth_seq_id: int) -> None:
+        """Build mappings between label_seq_id and auth_seq_id for a chain
+        
+        Args:
+            chain_id: The chain ID to build mappings for
+            first_auth_seq_id: First auth_seq_id in the chain
+            last_auth_seq_id: Last auth_seq_id in the chain
+        """
+        if not self.structure:
+            raise ValueError("Structure must be loaded before building sequence mappings")
+            
+        # Get the chain from the structure
+        chain = None
+        for model in self.structure:
+            if chain_id in model:
+                chain = model[chain_id]
+                break
+                
+        if not chain:
+            raise ValueError(f"Chain {chain_id} not found in structure")
+            
+        # Build the mapping for observed residues
+        current_label_seq_id = 1
+        for residue in sorted(chain.get_residues(), key=lambda r: r.id[1]):
+            if is_aa(residue):
+                auth_seq_id = residue.id[1]
+                auth_icode = residue.id[2]
+                
+                # Store both mappings
+                self.label_seq_id_to_auth_id_and_icode[(chain_id, current_label_seq_id)] = (auth_seq_id, auth_icode)
+                self.auth_id_to_label_seq_id[(chain_id, auth_seq_id)] = current_label_seq_id
+                
+                current_label_seq_id += 1
+                
+        # For missing residues within the range, extend the mapping linearly
+        for auth_seq_id in range(first_auth_seq_id, last_auth_seq_id + 1):
+            if (chain_id, auth_seq_id) not in self.auth_id_to_label_seq_id:
+                # Find the next available label_seq_id
+                while (chain_id, current_label_seq_id) in self.label_seq_id_to_auth_id_and_icode:
+                    current_label_seq_id += 1
+                    
+                # Add the mapping for this missing residue
+                self.label_seq_id_to_auth_id_and_icode[(chain_id, current_label_seq_id)] = (auth_seq_id, ' ')
+                self.auth_id_to_label_seq_id[(chain_id, auth_seq_id)] = current_label_seq_id
+                current_label_seq_id += 1
+                
+        self.logger.info(f"Built sequence mappings for chain {chain_id}")
+        self.logger.debug(f"Number of mappings: {len(self.label_seq_id_to_auth_id_and_icode)}")
+        
+    def get_auth_seq_id(self, chain_id: str, label_seq_id: int) -> Tuple[int, str]:
+        """Get auth_seq_id and icode for a given label_seq_id
+        
+        Args:
+            chain_id: Chain ID
+            label_seq_id: Label sequence ID
+            
+        Returns:
+            Tuple of (auth_seq_id, auth_icode)
+        """
+        if (chain_id, label_seq_id) not in self.label_seq_id_to_auth_id_and_icode:
+            raise ValueError(f"No mapping found for chain {chain_id}, label_seq_id {label_seq_id}")
+        return self.label_seq_id_to_auth_id_and_icode[(chain_id, label_seq_id)]
+        
+    def get_label_seq_id(self, chain_id: str, auth_seq_id: int) -> int:
+        """Get label_seq_id for a given auth_seq_id
+        
+        Args:
+            chain_id: Chain ID
+            auth_seq_id: Auth sequence ID
+            
+        Returns:
+            Label sequence ID
+        """
+        if (chain_id, auth_seq_id) not in self.auth_id_to_label_seq_id:
+            raise ValueError(f"No mapping found for chain {chain_id}, auth_seq_id {auth_seq_id}")
+        return self.auth_id_to_label_seq_id[(chain_id, auth_seq_id)] 
