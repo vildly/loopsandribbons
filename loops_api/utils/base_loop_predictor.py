@@ -180,7 +180,6 @@ class LoopPredictor:
         else:
             parser = PDBParser()
             self.structure = parser.get_structure('protein', self.pdb_file_path)
-            logging.warning("PDB files are less reliable for full sequence parsing. Missing loop sequences might be 'X's or require external fetching.")
             for model in self.structure:
                 for chain in model:
                     seq_from_atom = ""

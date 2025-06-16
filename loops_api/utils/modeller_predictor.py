@@ -23,6 +23,8 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from .base_loop_predictor import LoopPredictor, MissingRegion
 from .prediction_result import FileResultWriter
 
+DATA_DIR = Path('data')
+
 # Configure logging
 def setup_logging(prediction_dir: Path) -> logging.Logger:
     """Set up logging to write to a file in the prediction directory"""
@@ -82,12 +84,15 @@ class ModellerPredictor(LoopPredictor):
     """Loop prediction using Modeller"""
     
     def __init__(self, pdb_file_path: str):
-        super().__init__(pdb_file_path, result_writer=FileResultWriter())
+        pdb_file_path = Path(pdb_file_path)
+        print(f"pdb_file_path: {pdb_file_path}")
+      
+        super().__init__(str(pdb_file_path), result_writer=FileResultWriter())
         if not MODELLER_AVAILABLE:
             raise ImportError("Modeller is not available. Please install it from https://salilab.org/modeller/")
         
         self.env = modeller.Environ()
-        self.env.io.atom_files_directory = [os.path.dirname(os.path.abspath(pdb_file_path)), '.', '../atom_files']
+        self.env.io.atom_files_directory = [os.path.dirname(os.path.abspath(str(pdb_file_path))), '.', '../atom_files']
         self.env.io.hetatm = True
         self.env.io.water = True
         self.env.libs.topology.read('${LIB}/top_heav.lib')
@@ -106,6 +111,7 @@ class ModellerPredictor(LoopPredictor):
         
         # Get template ID from filename
         template_pdb_id = os.path.splitext(os.path.basename(self.pdb_file_path))[0].upper()
+        print(f"template_pdb_id: {template_pdb_id}")
         template_pdb_filename = f"{template_pdb_id}.pdb"
         template_pdb_path = os.path.join(self.temp_dir, template_pdb_filename)
         
@@ -114,6 +120,9 @@ class ModellerPredictor(LoopPredictor):
         io.set_structure(self.structure)
         io.save(template_pdb_path)
         print(f"Saved template structure as: {template_pdb_path}")
+        
+        # Update Modeller's environment to look in the temp directory
+        self.env.io.atom_files_directory = [str(self.temp_dir), os.path.dirname(os.path.abspath(str(self.pdb_file_path))), '.']
         
         print("\n=== DETAILED SEQUENCE DEBUGGING ===")
         print(f"Template PDB ID: {template_pdb_id}")

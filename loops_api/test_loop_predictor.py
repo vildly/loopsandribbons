@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import argparse
 
 # Add the parent directory to sys.path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -27,7 +28,7 @@ if MODELLER_AVAILABLE:
 def get_pdb_file(pdb_id: str) -> str:
     """Get PDB file path, downloading if necessary"""
     # Check if we already have the mmCIF file
-    cif_file = Path(f"{pdb_id}.cif")
+    cif_file = Path("data") / f"{pdb_id}.cif"
     if cif_file.exists():
         return str(cif_file)
     
@@ -42,7 +43,7 @@ def get_pdb_file(pdb_id: str) -> str:
         return str(cif_file)
     
     # Fallback to PDB
-    pdb_file = Path(f"{pdb_id}.pdb")
+    pdb_file = Path("data") / f"{pdb_id}.pdb"
     url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
     response = requests.get(url)
     
@@ -52,63 +53,15 @@ def get_pdb_file(pdb_id: str) -> str:
     
     return str(pdb_file)
 
-def extract_sequences_from_cif(cif_path):
-    mmcif_dict = MMCIF2Dict(cif_path)
-    # Get mapping from entity_id to chain_id(s)
-    entity_ids = mmcif_dict['_entity_poly.entity_id']
-    chain_ids = mmcif_dict['_entity_poly.pdbx_strand_id']
-    seqs = mmcif_dict['_entity_poly.pdbx_seq_one_letter_code']
-    entity_to_chains = {}
-    for eid, cids in zip(entity_ids, chain_ids):
-        for cid in cids.replace(' ', '').split(','):
-            entity_to_chains[cid] = eid
-    # Map chain_id to sequence
-    chain_to_seq = {}
-    for eid, cids, seq in zip(entity_ids, chain_ids, seqs):
-        for cid in cids.replace(' ', '').split(','):
-            chain_to_seq[cid] = seq.replace('\n', '').replace(' ', '')
-    return chain_to_seq
 
-def build_resnum_to_seqidx_map(chain, full_chain_sequence):
-    # Build a list of (resnum, one_letter) from ATOM records
-    pdb_residues = []
-    for residue in chain:
-        if is_aa(residue):
-            resnum = residue.id[1]
-            try:
-                aa = seq1(residue.resname)
-            except Exception:
-                aa = 'X'
-            pdb_residues.append((resnum, aa))
-    # Now, align this to the full_chain_sequence
-    seq = ''.join(aa for _, aa in pdb_residues)
-    idx = full_chain_sequence.find(seq)
-    if idx == -1:
-        # fallback: try to align by first residue
-        idx = 0
-    mapping = {}
-    for i, (resnum, _) in enumerate(pdb_residues):
-        mapping[resnum] = idx + i
-    return mapping
 
-def build_full_resnum_to_seqidx_map(mmcif_dict, chain_id, entity_id):
-    # Get all sequence numbers and mon_ids for this entity
-    nums = [int(n) for eid, n in zip(mmcif_dict['_entity_poly_seq.entity_id'], mmcif_dict['_entity_poly_seq.num']) if eid == entity_id]
-    mon_ids = [m for eid, m in zip(mmcif_dict['_entity_poly_seq.entity_id'], mmcif_dict['_entity_poly_seq.mon_id']) if eid == entity_id]
-    # Map PDB residue numbers to sequence indices
-    mapping = {}
-    for seqidx, resnum in enumerate(nums):
-        mapping[resnum] = seqidx
-    return mapping
-
-def test_modeller_predictions():
+def test_modeller_predictions(pdb_id: str):
     """Test Modeller-based loop predictions and structure insertion"""
     if not MODELLER_AVAILABLE:
         print("Modeller is not available. Skipping Modeller tests.")
         return
         
     # Get the structure file
-    pdb_id = "3IDP"  # Using 3IDP as it has a good example of a missing loop
     pdb_file = get_pdb_file(pdb_id)
     
     try:
@@ -198,10 +151,9 @@ def test_modeller_predictions():
         print(f"Error during testing: {e}")
         raise
 
-def test_simple_predictions():
+def test_simple_predictions(pdb_id: str):
     """Test simple linear interpolation predictions"""
     # Get the structure file
-    pdb_id = "3IDP"
     pdb_file = get_pdb_file(pdb_id)
     
     try:
@@ -253,5 +205,12 @@ def test_simple_predictions():
         raise
 
 if __name__ == "__main__":
-    #test_simple_predictions()
-    test_modeller_predictions() 
+    parser = argparse.ArgumentParser(description="Test loop predictors with a given PDB ID.")
+    parser.add_argument('--pdb_id', type=str, default='3IDP', help='PDB ID to use for testing (default: 3IDP)')
+    parser.add_argument('--predictor', type=str, choices=['modeller', 'simple'], default='modeller', help='Which predictor to test (modeller or simple)')
+    args = parser.parse_args()
+
+    if args.predictor == 'modeller':
+        test_modeller_predictions(args.pdb_id)
+    else:
+        test_simple_predictions(args.pdb_id) 
