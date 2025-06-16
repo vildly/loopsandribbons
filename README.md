@@ -105,9 +105,7 @@ LoopsAndRibbons/
 
 | Missing Region Models | Structure & Missing | Ramachandran Plot |
 |----------------------|---------------------|-------------------|
-| ![](predictions/3idp_missing_region_models.png) | ![](predictions/2idp_and_missing.png) | ![](predictions/3IDP_assembled_ramachandran.png) |
-
-<!-- Add more examples as needed -->
+| <img src="predictions/3idp_missing_region_models.png" width="250"> | <img src="predictions/2idp_and_missing.png" width="250"> | <img src="predictions/3IDP_assembled_ramachandran.png" width="250"> |
 
 ---
 ## Example Prediction Summary
@@ -199,19 +197,6 @@ For simple predictors, geometric criteria are primary. For Modeller-based predic
 - Improved accuracy for challenging loop regions
 - Integration with RareFold's quality assessment
 - Enhanced handling of non-canonical loop structures
-
-### Other Planned Improvements
-- **REST API endpoints and server** (full implementation)
-- **Dockerization** (containerized deployment)
-- **CI/CD pipeline** (automated testing and deployment)
-- **Hosting/Deployment** (host the service on a public or private server/cloud)
-- Hybrid approach combining multiple prediction methods
-- Enhanced quality metrics using machine learning
-- Support for non-standard amino acids
-- Improved handling of post-translational modifications
-- Better integration with experimental data
-- Real-time prediction progress monitoring
-- Batch processing capabilities
 
 ## License
 
