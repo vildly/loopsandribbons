@@ -6,6 +6,7 @@ from Bio.PDB.Polypeptide import is_aa
 from Bio.SeqUtils import seq1
 import numpy as np
 from collections import OrderedDict
+import os
 
 from .base_loop_predictor import LoopPredictor
 
@@ -31,7 +32,7 @@ class LoopAssembler:
         
     def assemble_structure(self, model_structure: Structure, region_chain_id: str, 
                           first_auth_seq_id: int, last_auth_seq_id: int, 
-                          ramachandran_png_path: Optional[str] = None) -> Structure:
+                          ramachandran_png_path: Optional[str] = None, pdb_id: Optional[str] = None) -> Structure:
         """Assemble a new structure combining original and modeled parts, and optionally save a Ramachandran plot.
         
         Args:
@@ -40,6 +41,7 @@ class LoopAssembler:
             first_auth_seq_id: First auth_seq_id in the region
             last_auth_seq_id: Last auth_seq_id in the region
             ramachandran_png_path: If provided, save a Ramachandran plot PNG to this path
+            pdb_id: If provided, use this as the title for the Ramachandran plot
         Returns:
             A new Structure object containing the assembled structure
         """
@@ -136,24 +138,11 @@ class LoopAssembler:
 
         # Optionally generate and save Ramachandran plot
         if ramachandran_png_path is not None:
-            import tempfile
-            io = PDBIO()
-            with tempfile.NamedTemporaryFile(suffix='.pdb', delete=False) as tmp:
-                io.set_structure(new_structure)
-                io.save(tmp.name)
-                tmp_pdb_path = tmp.name
-            print(f"[LoopAssembler] Generating Ramachandran plot for {tmp_pdb_path}")
-            try:
-                plot(tmp_pdb_path, cmap="viridis", alpha=0.75, dpi=100, save=True, show=False, filename=ramachandran_png_path)
-                print(f"[LoopAssembler] Ramachandran plot saved to {ramachandran_png_path}")
-            except Exception as e:
-                print(f"[LoopAssembler] Error generating Ramachandran plot: {e}")
+            self.save_ramachandran_plot(new_structure, ramachandran_png_path, title=(pdb_id if pdb_id else "Ramachandran plot"))
+        return new_structure
 
-        return new_structure 
-
-    def save_ramachandran_plot(self, structure: Structure, output_png: str):
+    def save_ramachandran_plot(self, structure: Structure, output_png: str, title: Optional[str] = None):
         """Generate and save a Ramachandran plot for the given structure using ramachandraw."""
-        # Save structure to a temporary PDB file
         import tempfile
         io = PDBIO()
         with tempfile.NamedTemporaryFile(suffix='.pdb', delete=False) as tmp:
@@ -161,9 +150,8 @@ class LoopAssembler:
             io.save(tmp.name)
             tmp_pdb_path = tmp.name
         print(f"[LoopAssembler] Generating Ramachandran plot for {tmp_pdb_path}")
-        # Generate and save the plot
         try:
-            plot(tmp_pdb_path, cmap="viridis", alpha=0.75, dpi=100, save=True, show=False, filename=output_png)
+            plot(tmp_pdb_path, cmap="viridis", alpha=0.75, dpi=100, save=True, show=False, filename=output_png, title=title)
             print(f"[LoopAssembler] Ramachandran plot saved to {output_png}")
         except Exception as e:
             print(f"[LoopAssembler] Error generating Ramachandran plot: {e}")
