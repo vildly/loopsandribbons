@@ -1,15 +1,20 @@
 from typing import Dict, Tuple, List, Optional
 from pathlib import Path
 import logging
-from Bio.PDB import Structure, Model, Chain, Residue, Atom, PDBParser, MMCIFParser, PDBIO
+from Bio.PDB import Structure, Model, Chain, Residue, Atom, PDBParser, MMCIFParser, PDBIO, Select
 from Bio.PDB.Polypeptide import is_aa
 from Bio.SeqUtils import seq1
 import numpy as np
+from collections import OrderedDict
 
 from .base_loop_predictor import LoopPredictor
 
 from ramachandraw.parser import get_phi_psi
 from ramachandraw.utils import plot
+
+class AlwaysWriteSelect(Select):
+    def accept_residue(self, residue):
+        return True
 
 class LoopAssembler:
     """Handles assembly of loop predictions into complete structures with correct numbering"""
@@ -87,8 +92,6 @@ class LoopAssembler:
             chain_to_patch.detach_child(res.id)
 
         # --- NEW LOGIC: Map modeller_rel_res_id to label_seq_id to auth_seq_id/auth_icode ---
-        # Find the first label_seq_id for the missing region in the mapping
-        # This is the minimum label_seq_id that maps to an auth_seq_id in the missing region
         label_seq_ids_in_region = [label_seq_id for (chain, label_seq_id), (auth_seq_id, _) in self.predictor.label_seq_id_to_auth_id_and_icode.items()
                                    if chain == region_chain_id and first_auth_seq_id <= auth_seq_id <= last_auth_seq_id]
         if not label_seq_ids_in_region:
@@ -96,22 +99,38 @@ class LoopAssembler:
         first_resolved_label_id_of_segment = min(label_seq_ids_in_region)
         print(f"[LoopAssembler] first_resolved_label_id_of_segment: {first_resolved_label_id_of_segment}")
 
-        # Add/replace residues from the modeled chain, renumbering as needed
+        # --- NEW: Build a new OrderedDict for the chain, inserting new residues in order ---
+        new_residues = OrderedDict()
+        for res in chain_to_patch:
+            if not (is_aa(res) and first_auth_seq_id <= res.id[1] <= last_auth_seq_id):
+                new_residues[res.id] = res
+
+        added_auth_seq_ids = set()
         for res in modeled_chain:
             if is_aa(res):
-                modeller_rel_res_id = res.get_id()[1]  # 1-based in MODELLER output
+                modeller_rel_res_id = res.get_id()[1]
                 corresponding_label_seq_id = first_resolved_label_id_of_segment + (modeller_rel_res_id - 1)
                 try:
                     auth_seq_id, auth_icode = self.predictor.get_auth_seq_id(region_chain_id, corresponding_label_seq_id)
                     if first_auth_seq_id <= auth_seq_id <= last_auth_seq_id:
                         print(f"[LoopAssembler] Adding residue: modeller_rel_res_id={modeller_rel_res_id}, label_seq_id={corresponding_label_seq_id}, auth_seq_id={auth_seq_id}, auth_icode={auth_icode}, resname={res.resname}")
-                        # Create new residue with correct numbering
                         new_residue = Residue.Residue((" ", auth_seq_id, auth_icode), res.resname, res.segid)
                         for atom in res:
                             new_residue.add(atom.copy())
-                        chain_to_patch.add(new_residue)
+                        new_resid = (" ", auth_seq_id, auth_icode)
+                        new_residues[new_resid] = new_residue
+                        added_auth_seq_ids.add(auth_seq_id)
                 except ValueError as e:
                     print(f"[LoopAssembler] Skipping residue {modeller_rel_res_id} (label_seq_id {corresponding_label_seq_id}): {e}")
+
+        # Sort the residues by auth_seq_id for correct order in the chain
+        sorted_residues = sorted(new_residues.values(), key=lambda r: r.id[1])
+        chain_to_patch.child_dict = OrderedDict((res.id, res) for res in sorted_residues)
+        chain_to_patch.child_list = sorted_residues
+
+        # Print all residue IDs in the final chain for verification
+        print(f"[LoopAssembler] Final residues in chain {region_chain_id}: {[res.id for res in chain_to_patch]}")
+        print(f"[LoopAssembler] Added auth_seq_ids from model: {sorted(added_auth_seq_ids)}")
 
         print(f"[LoopAssembler] Finished assembling structure.")
 
@@ -125,7 +144,7 @@ class LoopAssembler:
                 tmp_pdb_path = tmp.name
             print(f"[LoopAssembler] Generating Ramachandran plot for {tmp_pdb_path}")
             try:
-                plot(tmp_pdb_path, outpath=ramachandran_png_path)
+                plot(tmp_pdb_path, cmap="viridis", alpha=0.75, dpi=100, save=True, show=False, filename=ramachandran_png_path)
                 print(f"[LoopAssembler] Ramachandran plot saved to {ramachandran_png_path}")
             except Exception as e:
                 print(f"[LoopAssembler] Error generating Ramachandran plot: {e}")
@@ -147,4 +166,22 @@ class LoopAssembler:
             plot(tmp_pdb_path, cmap="viridis", alpha=0.75, dpi=100, save=True, show=False, filename=output_png)
             print(f"[LoopAssembler] Ramachandran plot saved to {output_png}")
         except Exception as e:
-            print(f"[LoopAssembler] Error generating Ramachandran plot: {e}") 
+            print(f"[LoopAssembler] Error generating Ramachandran plot: {e}")
+
+    def save_structure_as_cif(self, structure: Structure, output_cif: str):
+        """Save the given structure as a mmCIF file."""
+        io = MMCIFIO()
+        io.set_structure(structure)
+        io.save(output_cif)
+        print(f"[LoopAssembler] Structure saved to {output_cif}")
+
+    def save_structure_as_pdb(self, structure: Structure, output_pdb: str):
+        """Save the given structure as a PDB file, forcing all residues to be written."""
+        io = PDBIO()
+        io.set_structure(structure)
+        # Print all residues before saving for debug
+        for model in structure:
+            for chain in model:
+                print(f"[LoopAssembler] Chain {chain.id}: {[res.id for res in chain]}")
+        io.save(output_pdb, select=AlwaysWriteSelect())
+        print(f"[LoopAssembler] Structure saved to {output_pdb}") 
