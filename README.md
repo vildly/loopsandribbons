@@ -105,7 +105,7 @@ LoopsAndRibbons/
 
 | Missing Region Models | Structure & Missing | Ramachandran Plot |
 |----------------------|---------------------|-------------------|
-| <img src="predictions/3idp_missing_region_models.png" width="250"> | <img src="predictions/2idp_and_missing.png" width="250"> | <img src="predictions/3IDP_assembled_ramachandran.png" width="250"> |
+| <img src="loops_api/predictions/3IDP_missing_region_models.png" width="250"> | <img src="loops_api/predictions/3idp_and_1_missing.png" width="250"> | <img src="loops_api/predictions/3IDP_assembled_ramachandran.png" width="250"> |
 
 ---
 ## Example Prediction Summary
