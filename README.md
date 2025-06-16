@@ -23,10 +23,6 @@ This project provides tools for identifying and predicting missing regions (loop
 - **Results and Examples**
   - Example output images and PDBs in `predictions/`
   - Example Ramachandran plots and structure visualizations
-- **README**
-  - Example results table with images
-  - Project structure and feature overview
-
 ---
 
 ## Not Yet Implemented / Future Work 🚧
@@ -58,84 +54,6 @@ uv pip install -e .
 - Biopython
 - NumPy
 - Modeller (optional, for Modeller-based predictions)
-
-## API Endpoints 🔌 *(Planned)*
-
-> **Note:** The following endpoints are **not yet implemented**. This project does not currently provide any API or server. Making this a real API is planned for future work.
-
-```python
-import requests
-
-# Initialize a prediction job
-response = requests.post(
-    "http://localhost:8000/predict",
-    json={
-        "pdb_file": "path/to/structure.pdb",
-        "method": "simple",  # or "modeller"
-        "num_conformations": 5
-    }
-)
-
-# Get prediction results
-job_id = response.json()["job_id"]
-results = requests.get(f"http://localhost:8000/results/{job_id}")
-```
-
-### Planned Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/predict` | POST | Submit a new prediction job |
-| `/results/{job_id}` | GET | Get results for a specific job |
-| `/status/{job_id}` | GET | Check job status |
-| `/health` | GET | API health check |
-
----
-
-# Example Results
-
-| Missing Region Models | Structure & Missing | Ramachandran Plot |
-|----------------------|---------------------|-------------------|
-| ![](predictions/3idp_missing_region_models.png) | ![](predictions/2idp_and_missing.png) | ![](predictions/3IDP_assembled_ramachandran.png) |
-
-<!-- Add more examples as needed -->
-
----
-## Example Prediction Summary
-
-A `prediction_summary.json` file is generated in each prediction directory. Example:
-
-```json
-{
-  "timestamp": "20250616_120450",
-  "region_metadata": {
-    "chain_id": "B",
-    "start_res": 597,
-    "end_res": 614,
-    "length": 16,
-    "missing_sequence": "ATEKSRWSGSHQFEQL",
-    "full_chain_sequence": "HHHHHHDRNRMKTLGRRDSSDDWEIPDGQITVGQRIGSGSFGTVYKGKWHGDVAVKMLNVTAPTPQQLQAFKNEVGVLRKTRHVNILLFMGYSTKPQLAIVTQWCEGSSLYHHLHIIETKFEMIKLIDIARQTAQGMDYLHAKSIIHRDLKSNNIFLHEDLTVKIGDFGLATEKSRWSGSHQFEQLSGSILWMAPEVIRMQDKNPYSFQSDVYAFGIVLYELMTGQLPYSNINNRDQIIFMVGRGYLSPDLSKVRSNCPKAMKRLMAECLKKKRDERPLFPQILASIELLARSLPKIHRS"
-  },
-  "num_models": 1,
-  "models": [
-    {
-      "model_number": 1,
-      "quality_score": -31798.841796875,
-      "ga341_score": [
-        1.0,
-        0.30858367681503296,
-        -340.16363525390625,
-        -13.651281356811523,
-        -9.861736297607422,
-        -8.024914741516113,
-        -6.65782356262207,
-        -11.363975524902344
-      ],
-      "model_file": "model.B99990001.pdb"
-    }
-  ]
-}
-```
 
 ## Project Structure 📁
 
@@ -181,6 +99,54 @@ LoopsAndRibbons/
 - Robust structure merging and renumbering
 - Ramachandran plot generation
 - Output in PDB format
+
+
+## Example Results
+
+| Missing Region Models | Structure & Missing | Ramachandran Plot |
+|----------------------|---------------------|-------------------|
+| ![](predictions/3idp_missing_region_models.png) | ![](predictions/2idp_and_missing.png) | ![](predictions/3IDP_assembled_ramachandran.png) |
+
+<!-- Add more examples as needed -->
+
+---
+## Example Prediction Summary
+
+A `prediction_summary.json` file is generated in each prediction directory. Example:
+
+```json
+{
+  "timestamp": "20250616_120450",
+  "region_metadata": {
+    "chain_id": "B",
+    "start_res": 597,
+    "end_res": 614,
+    "length": 16,
+    "missing_sequence": "ATEKSRWSGSHQFEQL",
+    "full_chain_sequence": "HHHHHHDRNRMKTLGRRDSSDDWEIPDGQITVGQRIGSGSFGTVYKGKWHGDVAVKMLNVTAPTPQQLQAFKNEVGVLRKTRHVNILLFMGYSTKPQLAIVTQWCEGSSLYHHLHIIETKFEMIKLIDIARQTAQGMDYLHAKSIIHRDLKSNNIFLHEDLTVKIGDFGLATEKSRWSGSHQFEQLSGSILWMAPEVIRMQDKNPYSFQSDVYAFGIVLYELMTGQLPYSNINNRDQIIFMVGRGYLSPDLSKVRSNCPKAMKRLMAECLKKKRDERPLFPQILASIELLARSLPKIHRS"
+  },
+  "num_models": 1,
+  "models": [
+    {
+      "model_number": 1,
+      "quality_score": -31798.841796875,
+      "ga341_score": [
+        1.0,
+        0.30858367681503296,
+        -340.16363525390625,
+        -13.651281356811523,
+        -9.861736297607422,
+        -8.024914741516113,
+        -6.65782356262207,
+        -11.363975524902344
+      ],
+      "model_file": "model.B99990001.pdb"
+    }
+  ]
+}
+```
+
+
 
 ## Quality Metrics 📊
 
@@ -228,7 +194,7 @@ For simple predictors, geometric criteria are primary. For Modeller-based predic
 - Integration with AlphaFold's confidence metrics
 
 ### RareFold Integration *(Planned)*
-- Implementation of RareFold's specialized loop prediction
+- Implementation of [RareFold](https://github.com/patrickbryant1/RareFold)'s specialized loop prediction
 - Support for rare loop conformations
 - Improved accuracy for challenging loop regions
 - Integration with RareFold's quality assessment
@@ -246,17 +212,6 @@ For simple predictors, geometric criteria are primary. For Modeller-based predic
 - Better integration with experimental data
 - Real-time prediction progress monitoring
 - Batch processing capabilities
-
-## API Documentation 📚 *(Planned)*
-
-> **Note:** There is currently no API documentation because there is no API yet. Making this project into a real API with documentation is future work.
-
-Once the server is running, visit:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-
-
 
 ## License
 
