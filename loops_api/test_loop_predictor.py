@@ -247,6 +247,11 @@ def test_loop_assembler_on_modeller_output(pdb_id: str):
     io.save(str(output_path))
     print(f"Assembled structure saved to {output_path}")
 
+    # Save Ramachandran plot for the assembled structure
+    rama_png_path = Path("predictions") / f"{pdb_id}_assembled_ramachandran.png"
+    assembler.save_ramachandran_plot(assembled_structure, str(rama_png_path))
+    print(f"Ramachandran plot saved to {rama_png_path}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test loop predictors with a given PDB ID.")
     parser.add_argument('--pdb_id', type=str, default='3IDP', help='PDB ID to use for testing (default: 3IDP)')
